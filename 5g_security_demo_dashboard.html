@@ -126,9 +126,6 @@
         <h1 class="font-display-lg text-[28px] text-surface-tint tracking-tighter cursor-default">SliceShield Command Center</h1>
         <nav class="hidden md:flex items-center gap-6">
             <a class="font-headline-sm text-headline-sm text-primary border-b-2 border-primary pb-1 transition-colors" href="#">Operations</a>
-            <a class="font-headline-sm text-headline-sm text-on-surface-variant hover:text-primary-fixed-dim transition-colors" href="#">Threat Intelligence</a>
-            <a class="font-headline-sm text-headline-sm text-on-surface-variant hover:text-primary-fixed-dim transition-colors" href="#">Network Slices</a>
-            <a class="font-headline-sm text-headline-sm text-on-surface-variant hover:text-primary-fixed-dim transition-colors" href="#">Security Policy</a>
         </nav>
     </div>
     <div class="flex items-center gap-4">
@@ -159,37 +156,11 @@
             <span class="material-symbols-outlined">dashboard</span>
             <span class="font-mono-label text-mono-label">Dashboard</span>
         </a>
-        <a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-container-highest/50 hover:text-primary transition-all duration-200 group" href="#">
-            <span class="material-symbols-outlined group-hover:text-primary">radar</span>
-            <span class="font-mono-label text-mono-label">Threat Hunt</span>
-        </a>
-        <a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-container-highest/50 hover:text-primary transition-all duration-200 group" href="#">
-            <span class="material-symbols-outlined group-hover:text-primary">hub</span>
-            <span class="font-mono-label text-mono-label">Slice Topology</span>
-        </a>
-        <a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-container-highest/50 hover:text-primary transition-all duration-200 group" href="#">
-            <span class="material-symbols-outlined group-hover:text-primary">query_stats</span>
-            <span class="font-mono-label text-mono-label">Protocol Analysis</span>
-        </a>
-        <a class="flex items-center gap-3 px-4 py-3 text-on-surface-variant hover:bg-surface-container-highest/50 hover:text-primary transition-all duration-200 group" href="#">
-            <span class="material-symbols-outlined group-hover:text-primary">terminal</span>
-            <span class="font-mono-label text-mono-label">System Logs</span>
-        </a>
     </nav>
     <div class="p-6 mt-auto border-t border-outline-variant">
         <button class="w-full py-3 bg-error-container text-error font-mono-label text-mono-label rounded border border-error/20 hover:bg-error-container/80 active:scale-95 transition-all glow-red">
             DEPLOY MITIGATION
         </button>
-        <div class="mt-4 space-y-2">
-            <div class="flex items-center gap-2 text-on-surface-variant hover:text-primary cursor-pointer transition-colors">
-                <span class="material-symbols-outlined text-[18px]">history</span>
-                <span class="font-mono-label text-[11px]">Alert History</span>
-            </div>
-            <div class="flex items-center gap-2 text-on-surface-variant hover:text-primary cursor-pointer transition-colors">
-                <span class="material-symbols-outlined text-[18px]">help_center</span>
-                <span class="font-mono-label text-[11px]">Support</span>
-            </div>
-        </div>
     </div>
 </aside>
 
@@ -211,13 +182,6 @@
             <p id="m-isolations" class="font-data-value text-data-value text-primary mt-2">0</p>
             <div class="mt-4 h-[2px] w-full bg-surface-container-highest">
                 <div id="isolations-bar" class="h-full bg-primary transition-all duration-1000" style="width:0%"></div>
-            </div>
-        </div>
-        <div class="glass-surface p-6 rounded relative group hover:border-primary/40 transition-colors">
-            <h3 class="font-mono-label text-mono-label uppercase text-on-surface-variant tracking-widest">Avg Latency</h3>
-            <p id="m-latency" class="font-data-value text-data-value text-on-surface mt-2">0 <span class="text-sm font-normal text-on-surface-variant">ms</span></p>
-            <div class="mt-4 h-[2px] w-full bg-surface-container-highest">
-                <div id="latency-bar" class="h-full bg-surface-tint transition-all duration-1000" style="width:0%"></div>
             </div>
         </div>
         <div class="glass-surface p-6 rounded relative group hover:border-primary/40 transition-colors glow-cyan">
@@ -350,7 +314,7 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ slice: sId, attack: type })
-        });
+        }).catch(err => console.error("Attack trigger failed:", err));
     }
 
     // ── API: Show RCA ────────────────────────────────────────
@@ -362,7 +326,8 @@
 
         fetch(`${API_BASE}/api/rca/${sId}`)
             .then(res => res.json())
-            .then(data => { content.textContent = data.report; });
+            .then(data => { content.textContent = data.report; })
+            .catch(() => { content.textContent = 'No RCA generated yet.'; });
     }
 
     function closeRCA() {
@@ -412,15 +377,21 @@
                 if (data.length > processedLogs) {
                     for (let i = processedLogs; i < data.length; i++) {
                         const e = data[i];
-                        totalAttacks++;
-                        setMetric('m-attacks',    totalAttacks);
-                        setMetric('m-isolations', totalAttacks);
+                        
+                        if (e.event === 'slice_isolated') {
+                            totalAttacks++;
+                            setMetric('m-attacks',    totalAttacks);
+                            setMetric('m-isolations', totalAttacks);
 
-                        const pct = totalAttacks * 33;
-                        setBar('attacks-bar',    pct);
-                        setBar('isolations-bar', pct);
+                            const pct = Math.min(totalAttacks * 15, 100); 
+                            setBar('attacks-bar',    pct);
+                            setBar('isolations-bar', pct);
 
-                        appendLog('ALARM', `Slice ${e.slice_id} isolated.`, 'error');
+                            appendLog('ALARM', `Slice ${e.slice_id} ISOLATED [Threat: ${e.attack_type || 'Unknown'}]`, 'error');
+                        } 
+                        else if (e.event === 'slice_readmitted') {
+                            appendLog('INFO', `Slice ${e.slice_id} auto-recovered to NORMAL state.`, 'info');
+                        }
                     }
                     processedLogs = data.length;
                 }

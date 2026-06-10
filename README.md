@@ -2,7 +2,6 @@
 
 > **End-to-end security orchestration for 5G network slicing, combining Federated Learning, SDN automation, and AI-powered forensic analysis.**
 
-**Team:** ISP81 &nbsp;|&nbsp; **Department:** Information Science & Engineering
 
 [![5G Network Slicing](https://img.shields.io/badge/5G-Network_Slicing-0066CC?style=for-the-badge)](https://en.wikipedia.org/wiki/Network_slicing)
 [![Federated Learning](https://img.shields.io/badge/AI-Federated_Learning-27AE60?style=for-the-badge)](https://flower.ai/)

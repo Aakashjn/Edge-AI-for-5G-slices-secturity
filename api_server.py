@@ -46,7 +46,7 @@ def trigger_attack():
     try:
         from kafka import KafkaProducer
         producer = KafkaProducer(
-            bootstrap_servers='10.184.141.151:9093',
+            bootstrap_servers='10.168.72.151:9093',
             value_serializer=lambda v: json.dumps(v).encode('utf-8')
         )
         producer.send('slice-telemetry', {

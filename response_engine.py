@@ -13,7 +13,7 @@ CFG = {
     "clean_threshold": 0.30,
     "log_dir": "logs",
     "audit_log": "logs/response_audit.jsonl",
-    "vm_ip": "10.184.141.189", 
+    "vm_ip": "10.168.72.188", 
     "vm_ssh_port": "22", 
     "vm_user": "aakash"
 }

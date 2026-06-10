@@ -12,7 +12,7 @@ response_engine_instance = None
 
 BANNER = """
 ╔══════════════════════════════════════════════════════════════╗
-║           Edge AI for 5G Network Slice Security              ║ 
+║          Edge AI for 5G Network Slice Security               ║ 
 ╚══════════════════════════════════════════════════════════════╝
 """
 

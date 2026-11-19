@@ -1,0 +1,23 @@
+# Core pipeline
+torch>=2.2
+numpy>=1.26
+pandas>=2.1
+scikit-learn>=1.4
+requests>=2.31
+
+# Federated learning (training only)
+flwr[simulation]>=1.13
+
+# Live mode
+kafka-python>=2.0.2
+scapy>=2.5          # packet_sniffer.py
+
+# Dashboard API
+flask>=3.0
+flask-cors>=4.0
+
+# Tests
+pytest>=8.0
+
+# Optional: DP-SGD
+# opacus>=1.5

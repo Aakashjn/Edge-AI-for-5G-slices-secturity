@@ -23,8 +23,7 @@ Usage:
   python run_pipeline.py --train-only
 
 Install:
-  pip install flwr torch scikit-learn pandas numpy requests colorama
-  pip install kafka-python          # only for Kafka live mode
+  pip install -r requirements.txt
   pip install opacus                # only for DP-SGD privacy
 """
 
@@ -81,15 +80,11 @@ def run_stage_3_4_detect_and_respond(mode: str = "demo"):
     import detection_engine
     import response_engine
 
-    # Initialise response engine
     responder = response_engine.run()
-
-    # Wire alert callback: detection → response
-    def on_alert(alert: dict):
-        responder.handle_alert(alert)
-
-    # Run detection (blocking)
-    engine = detection_engine.run(mode=mode, alert_callback=on_alert)
+    # detection -> response: alerts trigger isolation, every window drives recovery
+    engine = detection_engine.run(mode=mode,
+                                  alert_callback=responder.handle_alert,
+                                  window_callback=responder.handle_window)
     return engine, responder
 
 # ─────────────────────────────────────────────────────────────
@@ -109,6 +104,9 @@ def print_summary(start_time: float,
         print(f"  Samples processed : {detect_stats.get('processed', 0)}")
         print(f"  Windows analysed  : {detect_stats.get('windows', 0)}")
         print(f"  Alerts raised     : {detect_stats.get('alerts', 0)}")
+        if "latency_p50_ms" in detect_stats:
+            print(f"  Detect latency    : p50 {detect_stats['latency_p50_ms']} ms / "
+                  f"p99 {detect_stats['latency_p99_ms']} ms")
 
     if response_stats:
         print(f"  Isolations made   : {response_stats.get('isolations', 0)}")
@@ -130,7 +128,6 @@ def check_dependencies():
     missing = []
     for pkg, import_name in [
         ("torch",        "torch"),
-        ("flwr",         "flwr"),
         ("pandas",       "pandas"),
         ("numpy",        "numpy"),
         ("sklearn",      "sklearn"),
@@ -151,8 +148,9 @@ def check_data_files(skip_train: bool):
     issues = []
     if not os.path.exists("malicious_data.csv"):
         issues.append("malicious_data.csv not found — place in current directory")
-    if skip_train and not os.path.exists("models/federated_model.pt"):
-        issues.append("models/federated_model.pt not found — run without --skip-train first")
+    from model import MODEL_PATH
+    if skip_train and not os.path.exists(MODEL_PATH):
+        issues.append(f"{MODEL_PATH} not found — run without --skip-train first")
     if issues:
         print("\n  ✗ Pre-flight issues:")
         for i in issues:
@@ -207,6 +205,11 @@ def main():
 
     # ── Stage 2: FL Training ──────────────────────────────
     if not args.skip_train:
+        try:
+            __import__("flwr")
+        except ImportError:
+            print("\n  ✗ flwr not installed — needed for training (pip install 'flwr[simulation]')")
+            sys.exit(1)
         try:
             model_path = run_stage_2_fl_training()
             print(f"\n  ✓ Model saved to {model_path}")

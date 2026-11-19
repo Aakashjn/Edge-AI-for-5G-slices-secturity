@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+data/
+logs/
+reports/
+RCA_Report_*.md
+# trained model is committed so --skip-train works; other checkpoints are not
+models/*
+!models/federated_model.pt

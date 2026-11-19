@@ -17,6 +17,8 @@ This document has three parts:
 Right now the end-to-end "AI detection" path is mostly a stub. A reviewer or examiner who reads
 the code will see this right away, so these come first.
 
+> **Status: Part 1 implemented on this branch.** See "Part 1 — what changed" below for a summary.
+
 ### 1.1 Detection does not use the model (`detection_engine.py`)
 
 | Line | Problem |
@@ -111,21 +113,36 @@ Server-Sent Events or WebSockets instead of re-reading the whole log every secon
 - Reports are written to the CWD with a timestamped name, so the API has to `listdir('.')`. Write them to `reports/` instead.
 - Subscriber data (IMSI/SUPI) may be sent to a third-party cloud LLM. Redact it, or use a local model (see 3.4).
 
+### Part 1 — what changed
+
+| Issue | Fix |
+|---|---|
+| 1.1 Fake detection | `detection_engine.py` loads the checkpoint, runs the model on every packet, decides per 5-packet sliding window, uses a calibrated threshold, measures latency (p50/p99), applies a per-slice alert cooldown, and has a real demo replay mode. No timer threads. |
+| 1.2 Untrained model saved | `fl_trainer.py` keeps the FedAvg-aggregated weights (`SavingFedAvg`) and calibrates the threshold on pooled validation data. It uses LayerNorm (works with DP and batch size 1) and `num_cpus=1`, and falls back to in-process FedAvg if Ray is unavailable. |
+| 1.3 Label leakage | `features.py` is the one extractor for training and live capture. Attack payloads are de-duplicated (18,458 → 11,298 unique) and split across slices. Benign data is realistic SBI, HTTP/2 control and MongoDB OP_MSG traffic, mixed differently per slice (non-IID). No scaler mismatch. |
+| 1.4 Unsafe response | All SDN actions use the Ryu REST API with cookie-tagged drop rules (delete by cookie only). The `ryu_enabled` flag is honoured. Recovery sees every window score, and a quiet-slice watchdog handles slices with no traffic. Alerts carry IoCs, so playbooks are applied. Circuit-breaker blocks are audited. |
+| 1.5 Fake dashboard demo | `attack_simulation.py` injects traffic through Kafka (or real HTTP) instead of writing audit events. The API needs an API key, validates input, restricts CORS, binds to localhost, and serves incremental logs and slice status. The dashboard shows re-admissions and goes green again. |
+| 1.6 Sniffer | Renamed to `packet_sniffer.py`. It applies the BPF filter, uses the shared extractor, forwards a hex payload for IoCs, and uses the same default broker as the rest of the system. |
+| 1.7 RCA agent | Untrusted packet bytes are fenced and escaped, SUPI/MSISDN values are redacted, requests have a timeout, reports go to `reports/`, and the endpoint is configurable (local LLM supported). |
+
+Verified: `pytest` (13 tests). A demo run detected 5 of 5 attack bursts with no benign-traffic alerts,
+p50 detection latency 0.18 ms, and isolation followed by re-admission, checked against a mock Ryu server.
+
 ---
 
 ## Part 2 — Engineering hygiene (quick wins, about 1–2 days)
 
-- [ ] **Single README.** The current file is two READMEs pasted together. Add an architecture diagram (Mermaid).
-- [ ] **`requirements.txt` / `pyproject.toml`** with pinned versions, and a `.gitignore` (`logs/`, `data/`, `models/`, `RCA_Report_*`, `__pycache__`).
+- [x] **Single README.** The current file is two READMEs pasted together. Add an architecture diagram (Mermaid).
+- [x] **`requirements.txt`** (pyproject still to do) with pinned versions, and a `.gitignore` (`logs/`, `data/`, `models/`, `RCA_Report_*`, `__pycache__`).
 - [ ] **Config via env/YAML** (`config.yaml` + `pydantic-settings`) instead of `CFG` dicts copied across 5 files. The feature dim, slice names, and broker address are each defined in multiple places today.
 - [ ] **Package layout:** `sliceshield/{features,detection,response,fl,agents,api}/`.
-- [ ] **Rename** `packet_sniffer(2).py` → `packet_sniffer.py`.
-- [ ] **Remove the hard-coded LAN IP** `10.184.141.151` from `docker-compose.yml`, and use `${HOST_IP}`.
+- [x] **Rename** `packet_sniffer(2).py` → `packet_sniffer.py`.
+- [x] **Remove the hard-coded LAN IP** `10.184.141.151` from `docker-compose.yml`, and use `${HOST_IP}`.
 - [ ] **Move Kafka to KRaft mode** (Kafka 3.x/4.x). ZooKeeper is removed in Kafka 4.0.
 - [ ] **Pin images.** Don't use `mlflow:latest`. Either use MLflow for real (log FL rounds and metrics) or remove it.
 - [ ] **Enable Prometheus and Grafana** by adding `docker/prometheus.yml`. Export detection latency, alerts per slice, FL round metrics, and isolations.
 - [ ] **Structured logging** (`logging`/`structlog`) instead of `print`.
-- [ ] **Tests (`pytest`):** feature extractor on known payloads, model load and inference shape, response engine with a mocked Ryu, and the circuit breaker.
+- [x] **Tests (`pytest`), first set:** feature extractor on known payloads, model load and inference shape, response engine with a mocked Ryu, and the circuit breaker.
 - [ ] **CI:** a GitHub Actions workflow for lint (`ruff`), tests, and a small training smoke test.
 - [ ] **Dockerfiles** for each service so the whole stack starts with one `docker compose up`.
 - [ ] **Model card and evaluation report:** confusion matrix, ROC/PR curves, per-slice metrics, and detection latency percentiles (p50/p95/p99).

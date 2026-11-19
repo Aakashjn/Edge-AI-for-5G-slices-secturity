@@ -9,75 +9,123 @@
         .metric-card { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; }
         .slice-card { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; transition: all 0.3s; cursor: pointer; }
         .slice-card.isolated { border-color: #ef4444; box-shadow: 0 0 15px rgba(239, 68, 68, 0.4); }
-        .log-box { background-color: #020617; border: 1px solid #334155; height: 200px; overflow-y: auto; font-family: monospace; padding: 10px; }
+        .log-box { background-color: #020617; border: 1px solid #334155; height: 240px; overflow-y: auto; font-family: monospace; padding: 10px; font-size: 0.85rem; }
         .text-cyan { color: #06b6d4; }
+        pre.rca { white-space: pre-wrap; background: #020617; padding: 12px; border-radius: 8px; max-height: 320px; overflow-y: auto; }
     </style>
 </head>
 <body class="py-4">
 <div class="container">
-    <h3 class="text-cyan fw-bold">SliceShield Command Center</h3>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h3 class="text-cyan fw-bold mb-0">SliceShield Command Center</h3>
+        <div class="input-group" style="max-width: 320px">
+            <span class="input-group-text">API key</span>
+            <input id="api-key" type="password" class="form-control" placeholder="printed by api_server.py">
+        </div>
+    </div>
     <div class="row mb-4 g-3">
-        <div class="col-md-3"><div class="metric-card p-3 text-center"><h6>Attacks</h6><h2 id="m-attacks">0</h2></div></div>
         <div class="col-md-3"><div class="metric-card p-3 text-center"><h6>Isolations</h6><h2 id="m-isolations">0</h2></div></div>
-        <div class="col-md-3"><div class="metric-card p-3 text-center"><h6>Avg Latency</h6><h2 id="m-latency">0 ms</h2></div></div>
-        <div class="col-md-3"><div class="metric-card p-3 text-center"><h6>Status</h6><h2 class="text-success">ACTIVE</h2></div></div>
+        <div class="col-md-3"><div class="metric-card p-3 text-center"><h6>Re-admissions</h6><h2 id="m-readmissions">0</h2></div></div>
+        <div class="col-md-3"><div class="metric-card p-3 text-center"><h6>Avg detect→isolate</h6><h2 id="m-latency">– ms</h2></div></div>
+        <div class="col-md-3"><div class="metric-card p-3 text-center"><h6>API</h6><h2 id="m-api" class="text-secondary">…</h2></div></div>
     </div>
     <div class="card metric-card mb-4 p-3">
-        <div class="d-flex gap-2">
-            <button class="btn btn-outline-danger" onclick="triggerAttack(0, 'ddos')">DDoS → eMBB</button>
-            <button class="btn btn-outline-warning" onclick="triggerAttack(1, 'nosql')">NoSQL → URLLC</button>
-            <button class="btn btn-outline-info" onclick="triggerAttack(2, 'lateral')">Lateral → mMTC</button>
+        <div class="d-flex flex-wrap gap-2">
+            <button class="btn btn-outline-danger"  onclick="inject(0, 'nosql')">NoSQL injection → eMBB</button>
+            <button class="btn btn-outline-warning" onclick="inject(1, 'nosql')">NoSQL injection → URLLC</button>
+            <button class="btn btn-outline-info"    onclick="inject(2, 'nosql')">NoSQL injection → mMTC</button>
+            <button class="btn btn-outline-success" onclick="inject(1, 'benign')">Benign SBI traffic → URLLC</button>
         </div>
+        <small class="text-secondary mt-2">Buttons send traffic through Kafka → model → SDN. A slice is only isolated if the model flags it.</small>
     </div>
     <div class="row mb-4 g-3" id="slices-grid"></div>
     <h6>Live Audit Log</h6>
-    <div class="log-box" id="audit-log"></div>
+    <div class="log-box mb-4" id="audit-log"></div>
+    <div id="rca-panel" class="d-none">
+        <h6 id="rca-title">RCA</h6>
+        <pre class="rca" id="rca-body"></pre>
+    </div>
 </div>
 <script>
-let processedLogs = 0, totalAttacks = 0, totalLatency = 0;
 const API_BASE = 'http://127.0.0.1:5002';
+const SLICES = {0: 'eMBB', 1: 'URLLC', 2: 'mMTC'};
+let next = 0, isolations = 0, readmissions = 0, totalMs = 0;
 
-function triggerAttack(sId, type) {
+const keyInput = document.getElementById('api-key');
+keyInput.value = localStorage.getItem('ss-api-key') || '';
+keyInput.addEventListener('change', () => localStorage.setItem('ss-api-key', keyInput.value));
+
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function log(cls, msg) {
+    const box = document.getElementById('audit-log');
+    box.insertAdjacentHTML('beforeend', `<div class="${cls}">${esc(msg)}</div>`);
+    box.scrollTop = box.scrollHeight;
+}
+
+function inject(sId, attack) {
     fetch(`${API_BASE}/api/attack`, {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({slice: sId, attack: type})
+        headers: {'Content-Type': 'application/json', 'X-API-Key': keyInput.value},
+        body: JSON.stringify({slice: sId, attack})
+    }).then(r => {
+        if (r.status === 401) log('text-warning', 'API key rejected — paste the key printed by api_server.py');
+        else log('text-secondary', `[${new Date().toLocaleTimeString()}] Injected ${attack} traffic into slice ${sId} (${SLICES[sId]})`);
     });
 }
 
 function showRCA(sId) {
-    fetch(`${API_BASE}/api/rca/${sId}`)
-        .then(res => res.json())
-        .then(data => alert(data.report));
+    fetch(`${API_BASE}/api/rca/${sId}`).then(r => r.json()).then(d => {
+        document.getElementById('rca-panel').classList.remove('d-none');
+        document.getElementById('rca-title').innerText = `RCA — Slice ${sId} (${SLICES[sId]})`;
+        document.getElementById('rca-body').textContent = d.report;   // textContent: never render as HTML
+    });
 }
 
-function updateUI() {
-    fetch(`${API_BASE}/api/logs`)
-        .then(res => res.json())
-        .then(data => {
-            if (data.length > processedLogs) {
-                for (let i = processedLogs; i < data.length; i++) {
-                    const e = data[i];
-                    totalAttacks++;
-                    document.getElementById('m-attacks').innerText = totalAttacks;
-                    document.getElementById('m-isolations').innerText = totalAttacks;
-                    
-                    const card = document.getElementById(`card-${e.slice_id}`);
-                    if (card) {
-                        card.classList.add('isolated');
-                        card.querySelector('span').className = 'badge bg-danger';
-                        card.querySelector('span').innerText = 'ISOLATED (Click for RCA)';
-                    }
-                    document.getElementById('audit-log').innerHTML += `<div class="text-danger">[${new Date().toLocaleTimeString()}] Slice ${e.slice_id} Isolated.</div>`;
-                }
-                processedLogs = data.length;
+function renderSlices(status) {
+    status.forEach(s => {
+        const card = document.getElementById(`card-${s.slice_id}`);
+        const badge = card.querySelector('span');
+        const iso = s.state === 'isolated';
+        card.classList.toggle('isolated', iso);
+        badge.className = 'badge ' + (iso ? 'bg-danger' : 'bg-success');
+        badge.innerText = iso ? `ISOLATED — ${s.attack_type || 'attack'} (click for RCA)` : 'NORMAL';
+    });
+}
+
+function poll() {
+    fetch(`${API_BASE}/api/logs?since=${next}`).then(r => r.json()).then(d => {
+        document.getElementById('m-api').className = 'text-success';
+        document.getElementById('m-api').innerText = 'UP';
+        d.events.forEach(e => {
+            const t = new Date(e.timestamp).toLocaleTimeString();
+            if (e.event === 'slice_isolated') {
+                isolations++; totalMs += e.total_ms || 0;
+                log('text-danger', `[${t}] Slice ${e.slice_id} ISOLATED — ${e.attack_type}, p=${e.avg_prob}, ${e.total_ms} ms`);
+            } else if (e.event === 'slice_readmitted') {
+                readmissions++;
+                log('text-success', `[${t}] Slice ${e.slice_id} re-admitted — ${e.reason}`);
+            } else {
+                log('text-warning', `[${t}] ${e.event} on slice ${e.slice_id}: ${e.reason || ''}`);
             }
         });
+        next = d.next;
+        document.getElementById('m-isolations').innerText = isolations;
+        document.getElementById('m-readmissions').innerText = readmissions;
+        if (isolations) document.getElementById('m-latency').innerText = (totalMs / isolations).toFixed(1) + ' ms';
+    }).catch(() => {
+        document.getElementById('m-api').className = 'text-danger';
+        document.getElementById('m-api').innerText = 'DOWN';
+    });
+    fetch(`${API_BASE}/api/status`).then(r => r.json()).then(renderSlices).catch(() => {});
 }
-[0,1,2].forEach(i => {
-    document.getElementById('slices-grid').innerHTML += `<div class="col-md-4"><div class="slice-card p-3" id="card-${i}" onclick="showRCA(${i})"><h5>Slice ${i}</h5><span class="badge bg-success">NORMAL</span></div></div>`;
+
+Object.entries(SLICES).forEach(([i, name]) => {
+    document.getElementById('slices-grid').insertAdjacentHTML('beforeend',
+        `<div class="col-md-4"><div class="slice-card p-3" id="card-${i}" onclick="showRCA(${i})"><h5>Slice ${i} · ${name}</h5><span class="badge bg-success">NORMAL</span></div></div>`);
 });
-setInterval(updateUI, 1000);
+setInterval(poll, 1000);
+poll();
 </script>
 </body>
 </html>

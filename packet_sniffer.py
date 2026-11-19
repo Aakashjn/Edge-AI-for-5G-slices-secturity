@@ -31,31 +31,29 @@ Architecture:
 """
 
 import os
-import re
 import sys
 import json
 import time
 import queue
-import hashlib
 import argparse
 import threading
 import ipaddress
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional
 
-import numpy as np
+from features import extract_features
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────
 CFG = {
     "interface":      os.getenv("INTERFACE", "eth0"),
-    "kafka_broker":   os.getenv("KAFKA_BROKER", "localhost:9092"),
+    "kafka_broker":   os.getenv("KAFKA_BROKER", "localhost:9093"),
     "kafka_topic":    os.getenv("KAFKA_TOPIC", "slice-telemetry"),
     "batch_size":     10,           # publish N packets at once
     "batch_timeout":  0.5,          # max seconds to wait before flushing
     "queue_maxsize":  5000,
-    "feature_dim":    20,
+    "max_payload":    1000,         # bytes of payload forwarded (hex) for IoCs / RCA
     # 5G SBI port (NRF/UDM/SMF all listen on 7777 by default in Open5GS)
     "sbi_port":       7777,
     # Slice IP ranges — map source IP to slice
@@ -93,7 +91,7 @@ def resolve_slice(src_ip: str) -> int:
                 return sid
     except Exception:
         pass
-    return 0   # default to eMBB
+    return 0   # unknown source -> eMBB (default slice)
 
 # ─────────────────────────────────────────────────────────────
 # FEATURE EXTRACTOR
@@ -101,141 +99,36 @@ def resolve_slice(src_ip: str) -> int:
 
 class FeatureExtractor:
     """
-    Extracts the same 20 features as data_pipeline.py
-    but from live scapy packets instead of CSV rows.
-    Maintains per-flow state for stateful features.
-    """
-    def __init__(self):
-        self._flow_stats: Dict[str, dict] = {}
+    Wraps features.extract_features (the SAME code used to build the training
+    set) for live scapy packets.
 
-    def _flow_key(self, pkt) -> str:
-        try:
-            src = pkt["IP"].src
-            dst = pkt["IP"].dst
-            sport = pkt["TCP"].sport if pkt.haslayer("TCP") else 0
-            dport = pkt["TCP"].dport if pkt.haslayer("TCP") else 0
-            return f"{src}:{sport}-{dst}:{dport}"
-        except Exception:
-            return "unknown"
+    Note: plaintext only. Production SBI is HTTP/2 over TLS; HTTP/2 frames are
+    flagged (is_http2) but HPACK headers are not decoded yet.
+    """
 
     def extract(self, pkt) -> Optional[dict]:
-        """Return feature dict or None if packet is not 5G SBI traffic."""
-        try:
-            from scapy.layers.inet import IP, TCP
-            from scapy.layers.http import HTTPRequest, HTTPResponse
+        """Return a telemetry message or None if the packet is not SBI traffic."""
+        from scapy.layers.inet import IP, TCP
 
-            if not pkt.haslayer(IP):
-                return None
-
-            src_ip = pkt[IP].src
-            dst_ip = pkt[IP].dst
-            slice_id = resolve_slice(src_ip)
-
-            # Only process TCP traffic on SBI port
-            if not pkt.haslayer(TCP):
-                return None
-
-            dport = pkt["TCP"].dport
-            sport = pkt["TCP"].sport
-            if dport != CFG["sbi_port"] and sport != CFG["sbi_port"]:
-                return None
-
-            # Extract raw payload
-            payload = bytes(pkt["TCP"].payload).decode("utf-8", errors="replace")
-            payload_len = len(payload)
-
-            # HTTP method
-            method_map = {"GET": 1, "POST": 2, "PUT": 3, "PATCH": 4,
-                          "DELETE": 5, "HEAD": 6, "OPTIONS": 7}
-            method = next(
-                (v for k, v in method_map.items() if payload.startswith(k)), 0
-            )
-
-            # HTTP status
-            status = 0
-            m = re.search(r"HTTP/[12](?:\.\d)? (\d{3})", payload)
-            if m:
-                status = int(m.group(1))
-
-            # Content length
-            clen = 0
-            m = re.search(r"[Cc]ontent-[Ll]ength:\s*(\d+)", payload)
-            if m:
-                clen = int(m.group(1))
-
-            # Endpoint detection
-            nrf_disc   = 1 if "/nnrf-disc/" in payload else 0
-            nrf_mgmt   = 1 if "/nnrf-nfm/"  in payload else 0
-            udm_access = 1 if "/nudm-sdm/"  in payload else 0
-
-            # NoSQL injection indicators
-            nosql_kw  = 1 if any(k in payload for k in [
-                "$and", "$or", "$nor", "$gt", "$lt", "$ne",
-                '{"find"', "NfProfile"
-            ]) else 0
-            inj_depth = min(payload.count("$"), 20) / 20.0
-
-            # MongoDB indicators
-            mongo_q   = 1 if '{"find"' in payload and "NfProfile" in payload else 0
-            mongo_err = 1 if "errmsg" in payload else 0
-            mongo_op  = 1 if '{"find"' in payload else 0
-
-            # IMSI
-            imsi = 1 if "imsi-" in payload.lower() else 0
-
-            # TCP flags
-            flags = pkt["TCP"].flags
-            syn_flag = 1 if flags & 0x02 else 0   # SYN
-
-            # Flow state
-            fkey  = self._flow_key(pkt)
-            fstat = self._flow_stats.setdefault(fkey, {
-                "pkt_count": 0, "last_ts": time.time(), "byte_count": 0
-            })
-            fstat["pkt_count"] += 1
-            fstat["byte_count"] += payload_len
-            flow_dur = time.time() - fstat["last_ts"]
-            fstat["last_ts"] = time.time()
-
-            # Cleanup old flows (> 60s)
-            now = time.time()
-            self._flow_stats = {
-                k: v for k, v in self._flow_stats.items()
-                if now - v["last_ts"] < 60
-            }
-
-            return {
-                "features": [
-                    method,
-                    nrf_disc,
-                    nrf_mgmt,
-                    udm_access,
-                    nosql_kw,
-                    min(status, 599) / 600.0,
-                    min(clen, 10000) / 10000.0,
-                    min(payload_len, 5000) / 5000.0,
-                    mongo_q,
-                    mongo_err,
-                    mongo_op,
-                    1 if 500 <= status < 600 else 0,
-                    1 if 400 <= status < 500 else 0,
-                    inj_depth,
-                    imsi,
-                    1 if method > 0 else 0,
-                    1 if status > 0 else 0,
-                    min(payload_len, 1000) / 1000.0,
-                    slice_id / 3.0,
-                    datetime.now().hour / 24.0,
-                ],
-                "slice_id":   slice_id,
-                "src_ip":     src_ip,
-                "dst_ip":     dst_ip,
-                "timestamp":  datetime.now().isoformat(),
-                "payload_snippet": payload[:200],
-            }
-
-        except Exception as e:
+        if not (pkt.haslayer(IP) and pkt.haslayer(TCP)):
             return None
+        tcp = pkt[TCP]
+        if CFG["sbi_port"] not in (tcp.dport, tcp.sport):
+            return None
+        payload = bytes(tcp.payload)
+        if not payload:
+            return None          # bare SYN/ACK etc.
+
+        src_ip, dst_ip = pkt[IP].src, pkt[IP].dst
+        slice_id = resolve_slice(src_ip)
+        return {
+            "features":    extract_features(payload, slice_id).tolist(),
+            "slice_id":    slice_id,
+            "src_ip":      src_ip,
+            "dst_ip":      dst_ip,
+            "timestamp":   datetime.now().isoformat(),
+            "payload_hex": payload[:CFG["max_payload"]].hex(),
+        }
 
 # ─────────────────────────────────────────────────────────────
 # KAFKA PUBLISHER
@@ -270,9 +163,8 @@ class KafkaPublisher:
         if self.dry_run:
             sid = feature_dict.get("slice_id", 0)
             feat = feature_dict.get("features", [])
-            nosql = feat[4] if len(feat) > 4 else 0
-            print(f"  [DryRun] Slice {sid}  nosql={nosql:.0f}  "
-                  f"features=[{', '.join(f'{v:.2f}' for v in feat[:5])}...]")
+            print(f"  [DryRun] Slice {sid}  {feature_dict.get('src_ip')} -> {feature_dict.get('dst_ip')}  "
+                  f"features=[{', '.join(f'{v:.2f}' for v in feat[:6])}...]")
             self._stats["published"] += 1
             return
 
@@ -381,6 +273,7 @@ class PacketSniffer:
 
         sniffer = AsyncSniffer(
             iface=self.interface,
+            filter=bpf,
             prn=self._packet_callback,
             store=False,
         )

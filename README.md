@@ -1,135 +1,101 @@
-
-# SliceShield: AI-Driven 5G Network Slice Security
-
-## Overview
-
-SliceShield is an end-to-end security platform for 5G network slicing. It leverages **Federated Learning** for distributed anomaly detection at the edge and an **SDN (Software Defined Networking)** controller for real-time threat mitigation. The system features automated isolation, forensic RCA (Root Cause Analysis), and self-healing (automated recovery).
-
-## Project Architecture
-
-## Component Breakdown
-
-| File | Role |
-| --- | --- |
-| `run_pipeline.py` | Orchestrates the entire execution flow (Data, Training, Detection). |
-| `data_pipeline.py` | Generates training datasets (malicious/benign) for specific slices. |
-| `fl_trainer.py` | Executes the Federated Learning training process to generate the model. |
-| `detection_engine.py` | Real-time inference engine consuming Kafka streams; triggers SDN isolation. |
-| `response_engine.py` | Manages SDN flows and automated recovery/restoration logic. |
-| `rca_agent.py` | AI-powered forensics agent using Groq/LLMs to generate incident reports. |
-| `api_server.py` | Flask backend serving log data and RCA reports to the dashboard. |
-| `packet_sniffer.py` | Captures SBI/5G traffic from the VM and publishes it to Kafka. |
-
-## Quick Start Guide
-
-### 1. Prerequisites
-
-* Mininet (with Ryu SDN Controller)
-* Docker & Docker Compose
-* Python 3.x with dependencies: `pip install flwr torch pandas numpy requests flask flask-cors kafka-python`
-
-### 2. Setup Infrastructure
-
-```bash
-# Start Kafka broker and supporting infrastructure
-sudo docker compose up -d
-
-```
-
-### 3. Execution Order
-
-**Terminal 1 (Detection/Response):**
-
-```bash
-python run_pipeline.py --skip-train --mode kafka
-
-```
-
-**Terminal 2 (Forensics Agent):**
-
-```bash
-export GROQ_API_KEY="your_api_key_here"
-python rca_agent.py
-
-```
-
-**Terminal 3 (Dashboard API):**
-
-```bash
-python api_server.py
-
-```
-
-**VM Terminal (Sensor Layer):**
-
-```bash
-# Replace interface and broker IP with your environment settings
-sudo python3 packet_sniffer.py --interface s1-eth3 --broker <LAPTOP_IP>:9093
-
-```
-
-## How it works (Demo Flow)
-
-1. **Attack Injection:** Use the dashboard buttons to trigger synthetic attack traffic from Mininet.
-2. **Detection:** The `detection_engine` identifies the anomaly in <50ms.
-3. **Response:** SDN controller isolates the slice. Dashboard turns **RED**.
-4. **Analysis:** `rca_agent` automatically analyzes the attack using LLMs.
-5. **Recovery:** The system automatically restores the slice and clears flows after the cooldown period. Dashboard turns **GREEN**.
-
-
-( i hv used VM and laptop ubuntu . and bridged them for communication has my ryu and mininet were in VM and the detection and run_piprlne .py were in laptop ubuntu)
-
-
-(for running everything in ubuntu  itself )
-
 # SliceShield: AI-Driven 5G Network Slice Security
 
 ### ISP81 | Dept. of ISE
 
-## Overview
+SliceShield is an end-to-end security pipeline for 5G network slices. **Federated learning** trains
+one attack detector across the slices (eMBB, URLLC, mMTC) without pooling their data. A real-time
+**detection engine** scores 5G SBI traffic. An **SDN response engine** (Ryu/OpenFlow) isolates an
+attacked slice and re-admits it automatically when traffic is clean again. An **LLM RCA agent**
+writes a forensic report for every incident.
 
-SliceShield is an end-to-end security platform for 5G network slicing. It leverages **Federated Learning** for distributed anomaly detection and an **SDN (Ryu)** controller for real-time threat mitigation.
+See [`IMPROVEMENTS.md`](IMPROVEMENTS.md) for the code review and the roadmap.
 
-## Project Architecture
+## Architecture
 
-## Running in Your Environment
+```mermaid
+flowchart LR
+  SNIFF[packet_sniffer.py<br/>SBI capture] -- Kafka slice-telemetry --> DET
+  SIM[attack_simulation.py] -- Kafka --> DET
+  DET[detection_engine.py<br/>model + sliding window] -- alert --> RESP[response_engine.py]
+  DET -- every window score --> RESP
+  RESP -- ofctl_rest add/delete<br/>cookie-tagged drop rule --> RYU[Ryu / OVS]
+  RESP -- audit JSONL --> RCA[rca_agent.py<br/>LLM report]
+  RESP -- audit JSONL --> API[api_server.py] --> UI[dashboard]
+  FL[fl_trainer.py<br/>Flower FedAvg] -- models/federated_model.pt --> DET
+  DATA[data_pipeline.py] -- data/slice_N.csv --> FL
+```
 
-Since the project runs on Ubuntu (with Mininet/Ryu and the Detection Engine on the same machine), use the following configuration:
+| File | Role |
+| --- | --- |
+| `features.py` | **Single feature extractor** (20 features) shared by training and live capture |
+| `model.py` | `SliceSecurityNet` model plus checkpoint save/load (stores the calibrated threshold) |
+| `data_pipeline.py` | Builds per-slice, non-IID datasets: de-duplicated attack payloads plus realistic benign SBI/MongoDB traffic |
+| `fl_trainer.py` | Flower FedAvg across slices; saves the **aggregated** model and a calibrated threshold |
+| `detection_engine.py` | Runs the model on every packet, decides per sliding window, measures latency, debounces alerts |
+| `response_engine.py` | Ryu REST isolation and recovery, circuit breaker, playbooks, audit log |
+| `rca_agent.py` | LLM root-cause reports, with prompt-injection fencing and SUPI redaction |
+| `api_server.py` | Dashboard backend: incremental logs, slice status, authenticated traffic injection |
+| `attack_simulation.py` | Injects NoSQL-injection or benign traffic **through the real pipeline** |
+| `packet_sniffer.py` | Captures SBI traffic (TCP 7777) and publishes features to Kafka |
 
-### 1. Requirements
+## Quick start (no SDN or Kafka needed)
 
-* **OS:** Ubuntu 22.04+
-* **Network:** Mininet, Ryu Controller, Docker
-* **Python:** 3.10+
-* **Environment:** Create a virtual environment (`venv`) to avoid system package conflicts.
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python run_pipeline.py --train-only                                  # data + federated training
+SLICESHIELD_RYU_ENABLED=0 python run_pipeline.py --skip-train --skip-data   # demo replay
+pytest -q
+```
 
-### 2. Execution Flow
+The demo replays benign SBI traffic on all three slices and injects NoSQL-injection bursts. You will
+see alerts, isolation, re-admission after clean windows, and a summary with measured detection latency.
+Remove `SLICESHIELD_RYU_ENABLED=0` when Ryu is running.
 
-Run these in separate terminal tabs in your `5gdemo` folder:
+## Full live setup (Ubuntu 22.04+, everything on one machine)
 
 | Terminal | Task | Command |
 | --- | --- | --- |
-| **Terminal 1** | **SDN Controller** | `ryu-manager ryu.app.ofctl_rest ryu.app.simple_switch_13` |
-| **Terminal 2** | **Mininet** | `sudo mn --topo single,3 --mac --switch ovsk --controller remote` |
-| **Terminal 3** | **Kafka/Docker** | `sudo docker compose up -d` |
-| **Terminal 4** | **Pipeline** | `python run_pipeline.py --skip-train --mode kafka` |
-| **Terminal 5** | **Forensics** | `export GROQ_API_KEY="your_key" && python rca_agent.py` |
-| **Terminal 6** | **API Server** | `python api_server.py` |
-| **Terminal 7** | **Packet Sniffer** | `sudo python3 packet_sniffer.py --interface s1-eth1 --broker localhost:9093` |
+| 1 | SDN controller | `ryu-manager ryu.app.ofctl_rest ryu.app.simple_switch_13` |
+| 2 | Mininet | `sudo mn --topo single,3 --mac --switch ovsk --controller remote` |
+| 3 | Kafka | `docker compose up -d` |
+| 4 | Detection and response | `python run_pipeline.py --skip-train --skip-data --mode kafka` |
+| 5 | Forensics | `export GROQ_API_KEY=...; python rca_agent.py` |
+| 6 | Dashboard API | `python api_server.py` (prints the API key for the dashboard) |
+| 7 | Packet sniffer | `sudo python3 packet_sniffer.py --interface s1-eth1 --broker localhost:9093` |
 
-*Note: In `packet_sniffer.py`, ensure the `--interface` matches the bridge interface created by Mininet (usually `s1-eth1` or `s1-eth3`).*
+Then open `5g_security_demo_dashboard.html`, paste the API key, and use the buttons. They send traffic
+through Kafka to the model. A slice turns **red** only if the model flags it, and turns **green** again
+when it is re-admitted.
 
-## Key Differences for your Team
+**Split VM/laptop setup:** run Kafka on the laptop with `HOST_IP=<laptop LAN IP> docker compose up -d`.
+Point the sniffer at `--broker <laptop IP>:9093`, and set `RYU_URL=http://<vm ip>:8080` for the pipeline.
 
-* **No Remote IP Needed:** Because Ryu, Mininet, and the Pipeline are on the same machine, you can use `localhost` for all connections (Kafka, API, and SDN Controller).
-* **Interface Visibility:** When you run `sudo mn`, Mininet creates virtual interfaces. Use `ifconfig` in a separate terminal to ensure you are sniffing the correct switch port.
-* **RCA Integration:** The `rca_agent.py` reads logs from `logs/response_audit.jsonl`. Since this is a local file, ensure your team has read/write permissions for the `logs/` directory.
+### Configuration (environment variables)
 
-## File Context
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `KAFKA_BROKER` | `localhost:9093` | Kafka bootstrap server |
+| `RYU_URL` / `RYU_DPID` | `http://localhost:8080` / `1` | Ryu ofctl_rest endpoint and switch |
+| `SLICESHIELD_RYU_ENABLED` | `1` | `0` = log SDN actions without a controller |
+| `SLICESHIELD_MODEL` | `models/federated_model.pt` | Model checkpoint |
+| `SLICESHIELD_API_KEY` | random per run | Key for `POST /api/attack` |
+| `FL_ENGINE` | `auto` | `flower` (Ray simulation) or `local` (in-process FedAvg) |
+| `RCA_LLM_URL` / `RCA_LLM_MODEL` | Groq / `llama-3.1-8b-instant` | Any OpenAI-compatible endpoint, e.g. a local Ollama |
 
-* **`run_pipeline.py`**: The "Master Switch." Use this to start the detection loop.
-* **`packet_sniffer.py`**: The "Eyes." It watches the Mininet switch and pipes data to Kafka.
-* **`api_server.py`**: The "Bridge." Connects the dashboard to your logs.
-* **`detection_engine.py`**: The "Brain." Includes the `_auto_recover` function which talks to your Ryu controller via `requests.delete` to clear SDN flows.
+## Slice mapping
 
+| Slice | Name | Source subnet (sniffer) | Switch port |
+| --- | --- | --- | --- |
+| 0 | eMBB | 10.10.0.0/24 | 1 |
+| 1 | URLLC | 10.20.0.0/24 | 2 |
+| 2 | mMTC | 10.30.0.0/24 | 3 |
 
+## Known limitations
+
+- Benign training traffic is **generated**, and `malicious_data.csv` is labelled per capture, so it
+  contains some normal-looking packets. The reported F1 (~0.94) is on held-out data from the same sources. A labelled
+  Open5GS/free5GC + UERANSIM capture is needed for real-world numbers (roadmap 3.1).
+- The model only knows one attack family (NoSQL injection against the NRF/UDR). DDoS and lateral
+  movement need new training data.
+- The sniffer parses plaintext HTTP/1.1. HTTP/2 frames are flagged, but HPACK is not decoded, and TLS traffic is out of reach.
